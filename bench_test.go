@@ -7,9 +7,10 @@ import (
 	"testing"
 )
 
-func populateRegular(m *RegularIntMap) {
-
-}
+// Used to prevent compiler optimizations to ensure no dead code elimination.
+// These ensure our Load functions aren't eliminated because we capture the result.
+var globalResult int
+var globalResultChan = make(chan int, 100)
 
 func nrand(n int) []int {
 	i := make([]int, n)
@@ -19,18 +20,20 @@ func nrand(n int) []int {
 	return i
 }
 
-func populateMap(n int, rm *RegularIntMap) {
+func populateMap(n int, rm *RegularIntMap) []int {
 	nums := nrand(n)
 	for _, v := range nums {
 		rm.Store(v, v)
 	}
+	return nums
 }
 
-func populateSyncMap(n int, sm *sync.Map) {
+func populateSyncMap(n int, sm *sync.Map) []int {
 	nums := nrand(n)
 	for _, v := range nums {
 		sm.Store(v, v)
 	}
+	return nums
 }
 
 func BenchmarkStoreRegular(b *testing.B) {
@@ -84,10 +87,13 @@ func BenchmarkLoadRegularFound(b *testing.B) {
 		rm.Store(v, v)
 	}
 
+	currentResult := 0
 	b.ResetTimer()
+
 	for i := 0; i < b.N; i++ {
-		rm.Load(nums[i])
+		currentResult, _ = rm.Load(nums[i])
 	}
+	globalResult = currentResult
 }
 
 func BenchmarkLoadRegularNotFound(b *testing.B) {
@@ -96,11 +102,12 @@ func BenchmarkLoadRegularNotFound(b *testing.B) {
 	for _, v := range nums {
 		rm.Store(v, v)
 	}
-
+	currentResult := 0
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		rm.Load(i)
+		currentResult, _ = rm.Load(i)
 	}
+	globalResult = currentResult
 }
 
 func BenchmarkLoadSyncFound(b *testing.B) {
@@ -109,11 +116,15 @@ func BenchmarkLoadSyncFound(b *testing.B) {
 	for _, v := range nums {
 		sm.Store(v, v)
 	}
-
+	currentResult := 0
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sm.Load(nums[i])
+		r, ok := sm.Load(nums[i])
+		if ok {
+			currentResult = r.(int)
+		}
 	}
+	globalResult = currentResult
 }
 
 func BenchmarkLoadSyncNotFound(b *testing.B) {
@@ -122,34 +133,15 @@ func BenchmarkLoadSyncNotFound(b *testing.B) {
 	for _, v := range nums {
 		sm.Store(v, v)
 	}
-
+	currentResult := 0
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sm.Load(i)
+		r, ok := sm.Load(i)
+		if ok {
+			currentResult = r.(int)
+		}
 	}
-}
-
-func benchmarkRegularStableKeys(b *testing.B, workerCount int) {
-	runtime.GOMAXPROCS(workerCount)
-
-	rm := NewRegularIntMap()
-	populateMap(b.N, rm)
-
-	var wg sync.WaitGroup
-	wg.Add(workerCount)
-
-	b.ResetTimer()
-
-	for wc := 0; wc < workerCount; wc++ {
-		go func(n int) {
-			for i := 0; i < n; i++ {
-				rm.Load(5)
-			}
-			wg.Done()
-		}(b.N)
-	}
-
-	wg.Wait()
+	globalResult = currentResult
 }
 
 func BenchmarkRegularStableKeys1(b *testing.B) {
@@ -178,6 +170,34 @@ func BenchmarkRegularStableKeys32(b *testing.B) {
 
 func BenchmarkRegularStableKeys64(b *testing.B) {
 	benchmarkRegularStableKeys(b, 64)
+}
+
+func benchmarkRegularStableKeys(b *testing.B, workerCount int) {
+	runtime.GOMAXPROCS(workerCount)
+
+	rm := NewRegularIntMap()
+	populateMap(b.N, rm)
+
+	var wg sync.WaitGroup
+	wg.Add(workerCount)
+
+	// Holds our final results, to prevent compiler optimizations.
+	globalResultChan = make(chan int, workerCount)
+
+	b.ResetTimer()
+
+	for wc := 0; wc < workerCount; wc++ {
+		go func(n int) {
+			currentResult := 0
+			for i := 0; i < n; i++ {
+				currentResult, _ = rm.Load(5)
+			}
+			globalResultChan <- currentResult
+			wg.Done()
+		}(b.N)
+	}
+
+	wg.Wait()
 }
 
 func BenchmarkSyncStableKeys1(b *testing.B) {
@@ -217,13 +237,136 @@ func benchmarkSyncStableKeys(b *testing.B, workerCount int) {
 	var wg sync.WaitGroup
 	wg.Add(workerCount)
 
+	// Holds our final results, to prevent compiler optimizations.
+	globalResultChan = make(chan int, workerCount)
+
 	b.ResetTimer()
 
 	for wc := 0; wc < workerCount; wc++ {
 		go func(n int) {
+			currentResult := 0
 			for i := 0; i < n; i++ {
-				sm.Load(5)
+				r, ok := sm.Load(5)
+				if ok {
+					currentResult = r.(int)
+				}
 			}
+			globalResultChan <- currentResult
+			wg.Done()
+		}(b.N)
+	}
+
+	wg.Wait()
+}
+
+func BenchmarkRegularStableKeysFound1(b *testing.B) {
+	benchmarkRegularStableKeysFound(b, 1)
+}
+
+func BenchmarkRegularStableKeysFound2(b *testing.B) {
+	benchmarkRegularStableKeysFound(b, 2)
+}
+
+func BenchmarkRegularStableKeysFound4(b *testing.B) {
+	benchmarkRegularStableKeysFound(b, 4)
+}
+
+func BenchmarkRegularStableKeysFound8(b *testing.B) {
+	benchmarkRegularStableKeysFound(b, 8)
+}
+
+func BenchmarkRegularStableKeysFound16(b *testing.B) {
+	benchmarkRegularStableKeysFound(b, 16)
+}
+
+func BenchmarkRegularStableKeysFound32(b *testing.B) {
+	benchmarkRegularStableKeysFound(b, 32)
+}
+
+func BenchmarkRegularStableKeysFound64(b *testing.B) {
+	benchmarkRegularStableKeysFound(b, 64)
+}
+
+func benchmarkRegularStableKeysFound(b *testing.B, workerCount int) {
+	runtime.GOMAXPROCS(workerCount)
+
+	rm := NewRegularIntMap()
+	values := populateMap(b.N, rm)
+
+	var wg sync.WaitGroup
+	wg.Add(workerCount)
+
+	// Holds our final results, to prevent compiler optimizations.
+	globalResultChan = make(chan int, workerCount)
+
+	b.ResetTimer()
+
+	for wc := 0; wc < workerCount; wc++ {
+		go func(n int) {
+			currentResult := 0
+			for i := 0; i < n; i++ {
+				currentResult, _ = rm.Load(values[i])
+			}
+			globalResultChan <- currentResult
+			wg.Done()
+		}(b.N)
+	}
+
+	wg.Wait()
+}
+
+func BenchmarkSyncStableKeysFound1(b *testing.B) {
+	benchmarkSyncStableKeysFound(b, 1)
+}
+
+func BenchmarkSyncStableKeysFound2(b *testing.B) {
+	benchmarkSyncStableKeysFound(b, 2)
+}
+
+func BenchmarkSyncStableKeysFound4(b *testing.B) {
+	benchmarkSyncStableKeysFound(b, 4)
+}
+
+func BenchmarkSyncStableKeysFound8(b *testing.B) {
+	benchmarkSyncStableKeysFound(b, 8)
+}
+
+func BenchmarkSyncStableKeysFound16(b *testing.B) {
+	benchmarkSyncStableKeysFound(b, 16)
+}
+
+func BenchmarkSyncStableKeysFound32(b *testing.B) {
+	benchmarkSyncStableKeysFound(b, 32)
+}
+
+func BenchmarkSyncStableKeysFound64(b *testing.B) {
+	benchmarkSyncStableKeysFound(b, 64)
+}
+
+func benchmarkSyncStableKeysFound(b *testing.B, workerCount int) {
+	runtime.GOMAXPROCS(workerCount)
+
+	var sm sync.Map
+	values := populateSyncMap(b.N, &sm)
+
+	var wg sync.WaitGroup
+	wg.Add(workerCount)
+
+	// Holds our final results, to prevent compiler optimizations.
+	globalResultChan = make(chan int, workerCount)
+
+	b.ResetTimer()
+
+	for wc := 0; wc < workerCount; wc++ {
+		go func(n int) {
+			currentResult := 0
+			for i := 0; i < n; i++ {
+				r, ok := sm.Load(values[i])
+				if ok {
+					currentResult = r.(int)
+				}
+			}
+			globalResultChan <- currentResult
 			wg.Done()
 		}(b.N)
 	}

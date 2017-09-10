@@ -62,7 +62,7 @@ func syncMapUsage() {
 	// Fetch the item we just stored.
 	result, ok = sm.Load("hello")
 	if ok {
-		fmt.Printf("result: `%s` found for key: `hello`\n", result)
+		fmt.Printf("result: `%s` found for key: `hello`\n", result.(string))
 	}
 
 	fmt.Println("---------------------------")
